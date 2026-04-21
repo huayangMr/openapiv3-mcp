@@ -6,6 +6,7 @@ Supports OpenAPI 3.0 and Swagger 2.0 specifications
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from urllib.parse import urljoin, urlsplit
 
 import requests
 import yaml
@@ -13,7 +14,8 @@ from openapi_spec_validator.readers import read_from_filename
 
 from swagger_mcp.models import (
     SwaggerDocument, SwaggerInfo, ApiEndpoint, Schema,
-    Parameter, Response, RequestBody, SchemaProperty
+    Parameter, Response, RequestBody, SchemaProperty,
+    SwaggerConfig, SwaggerService
 )
 
 
@@ -27,28 +29,38 @@ class SwaggerParser:
     
     def __init__(self):
         self.current_document: Optional[SwaggerDocument] = None
+        self.current_swagger_config: Optional[SwaggerConfig] = None
     
     def load_from_url(self, url: str) -> SwaggerDocument:
         """从URL加载OpenAPI/Swagger文档"""
         try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            
-            content_type = response.headers.get('content-type', '')
-            if 'application/json' in content_type:
-                spec_dict = response.json()
-            elif 'application/yaml' in content_type or 'text/yaml' in content_type:
-                spec_dict = yaml.safe_load(response.text)
-            else:
-                # 尝试JSON，如果失败则尝试YAML
-                try:
-                    spec_dict = response.json()
-                except json.JSONDecodeError:
-                    spec_dict = yaml.safe_load(response.text)
-            
+            spec_dict = self._fetch_spec_dict_from_url(url)
+            if self._is_swagger_config(spec_dict):
+                raise ValueError("URL points to a Swagger config document, not an OpenAPI/Swagger spec")
             self.current_document = self._parse_spec(spec_dict)
             return self.current_document
             
+        except requests.RequestException as e:
+            raise ValueError(f"Failed to load Swagger document from URL: {e}")
+        except (json.JSONDecodeError, yaml.YAMLError) as e:
+            raise ValueError(f"Failed to parse Swagger document: {e}")
+
+    def load_source_from_url(self, url: str) -> Dict[str, Any]:
+        """从 URL 加载资源，支持 OpenAPI 文档和 swagger-config"""
+        try:
+            spec_dict = self._fetch_spec_dict_from_url(url)
+            if self._is_swagger_config(spec_dict):
+                swagger_config = self._store_swagger_config(url, spec_dict)
+                return {
+                    "resource_type": "swagger_config",
+                    "swagger_config": swagger_config
+                }
+
+            self.current_document = self._parse_spec(spec_dict)
+            return {
+                "resource_type": "document",
+                "document": self.current_document
+            }
         except requests.RequestException as e:
             raise ValueError(f"Failed to load Swagger document from URL: {e}")
         except (json.JSONDecodeError, yaml.YAMLError) as e:
@@ -117,6 +129,91 @@ class SwaggerParser:
             servers=servers,
             security_definitions=security_definitions
         )
+
+    def _fetch_spec_dict_from_url(self, url: str) -> Dict[str, Any]:
+        """从远程地址拉取并解析 JSON/YAML"""
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+
+        content_type = response.headers.get('content-type', '')
+        if 'application/json' in content_type:
+            spec_dict = response.json()
+        elif 'application/yaml' in content_type or 'text/yaml' in content_type:
+            spec_dict = yaml.safe_load(response.text)
+        else:
+            try:
+                spec_dict = response.json()
+            except json.JSONDecodeError:
+                spec_dict = yaml.safe_load(response.text)
+
+        if not isinstance(spec_dict, dict):
+            raise ValueError("Swagger response is not a valid JSON/YAML object")
+        return spec_dict
+
+    def _is_swagger_config(self, spec_dict: Dict[str, Any]) -> bool:
+        """识别 swagger-ui / springdoc 的 swagger-config 返回体"""
+        urls = spec_dict.get('urls')
+        if not isinstance(urls, list) or not urls:
+            return False
+
+        for service in urls:
+            if not isinstance(service, dict) or 'url' not in service:
+                return False
+        return True
+
+    def _store_swagger_config(self, config_url: str, spec_dict: Dict[str, Any]) -> SwaggerConfig:
+        """缓存 swagger-config 信息"""
+        split_result = urlsplit(config_url)
+        origin = f"{split_result.scheme}://{split_result.netloc}"
+
+        services = []
+        for item in spec_dict.get('urls', []):
+            raw_url = str(item.get('url', ''))
+            name = str(item.get('name') or raw_url)
+            services.append(
+                SwaggerService(
+                    name=name,
+                    url=raw_url,
+                    document_url=self._build_service_document_url(origin, raw_url)
+                )
+            )
+
+        swagger_config = SwaggerConfig(
+            config_url=config_url,
+            origin=origin,
+            services=services,
+            primary_name=spec_dict.get('urls.primaryName')
+        )
+        self.current_swagger_config = swagger_config
+        return swagger_config
+
+    def _build_service_document_url(self, origin: str, service_url: str) -> str:
+        """构造服务文档的完整访问地址"""
+        if service_url.startswith(("http://", "https://")):
+            return service_url
+        return urljoin(f"{origin}/", service_url.lstrip("/"))
+
+    def list_swagger_services(self) -> List[SwaggerService]:
+        """返回当前缓存的服务列表"""
+        if not self.current_swagger_config:
+            return []
+        return self.current_swagger_config.services
+
+    def load_swagger_service(self, service: str) -> SwaggerDocument:
+        """按服务名或原始 URL 加载具体 Swagger 文档"""
+        if not self.current_swagger_config:
+            raise ValueError("No Swagger config loaded. Please load a swagger-config URL first.")
+
+        selected_service = None
+        for candidate in self.current_swagger_config.services:
+            if candidate.name == service or candidate.url == service:
+                selected_service = candidate
+                break
+
+        if not selected_service:
+            raise ValueError(f"Swagger service not found: {service}")
+
+        return self.load_from_url(selected_service.document_url)
     
     def _parse_paths(self, paths: Dict[str, Any]) -> List[ApiEndpoint]:
         """解析API路径"""

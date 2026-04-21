@@ -37,7 +37,25 @@ def load_swagger(source: str, source_type: str = "url") -> Dict[str, Any]:
     """
     try:
         if source_type.lower() == "url":
-            doc = parser.load_from_url(source)
+            result = parser.load_source_from_url(source)
+            if result["resource_type"] == "swagger_config":
+                swagger_config = result["swagger_config"]
+                services = [
+                    {
+                        "name": service.name,
+                        "url": service.url,
+                        "document_url": service.document_url
+                    }
+                    for service in swagger_config.services
+                ]
+                return {
+                    "success": True,
+                    "message": f"Successfully loaded Swagger config with {len(services)} services",
+                    "services": services,
+                    "primary_name": swagger_config.primary_name
+                }
+
+            doc = result["document"]
         elif source_type.lower() == "file":
             doc = parser.load_from_file(source)
         else:
@@ -61,6 +79,56 @@ def load_swagger(source: str, source_type: str = "url") -> Dict[str, Any]:
         return {
             "success": False,
             "error": f"Failed to load Swagger document: {str(e)}"
+        }
+
+
+@mcp.tool()
+def list_swagger_services() -> Dict[str, Any]:
+    """列出 swagger-config 中提供的服务文档列表"""
+    if not parser.current_swagger_config:
+        return {
+            "success": False,
+            "error": "No Swagger config loaded. Please load a swagger-config URL first."
+        }
+
+    services = [
+        {
+            "name": service.name,
+            "url": service.url,
+            "document_url": service.document_url
+        }
+        for service in parser.list_swagger_services()
+    ]
+
+    return {
+        "success": True,
+        "config_url": parser.current_swagger_config.config_url,
+        "primary_name": parser.current_swagger_config.primary_name,
+        "services": services,
+        "total_count": len(services)
+    }
+
+
+@mcp.tool()
+def load_swagger_service(service: str) -> Dict[str, Any]:
+    """按服务名或原始 URL 加载 swagger-config 中声明的具体服务文档"""
+    try:
+        doc = parser.load_swagger_service(service)
+        return {
+            "success": True,
+            "message": f"Successfully loaded Swagger document for service: {service}",
+            "info": {
+                "title": doc.info.title,
+                "version": doc.info.version,
+                "description": doc.info.description,
+                "api_count": len(doc.apis),
+                "schema_count": len(doc.schemas)
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to load Swagger service: {str(e)}"
         }
 
 
@@ -362,10 +430,20 @@ def run_server():
         print(f"Loading OpenAPI/Swagger document: {args.swagger_uri}")
         try:
             if args.swagger_uri.startswith(("http://", "https://")):
-                doc = parser.load_from_url(args.swagger_uri)
+                result = parser.load_source_from_url(args.swagger_uri)
+                if result["resource_type"] == "swagger_config":
+                    swagger_config = result["swagger_config"]
+                    print(
+                        "Successfully loaded Swagger config: "
+                        f"{len(swagger_config.services)} services discovered"
+                    )
+                    doc = None
+                else:
+                    doc = result["document"]
             else:
                 doc = parser.load_from_file(args.swagger_uri)
-            print(f"Successfully loaded OpenAPI/Swagger document: {doc.info.title}")
+            if doc is not None:
+                print(f"Successfully loaded OpenAPI/Swagger document: {doc.info.title}")
         except Exception as e:
             print(f"Warning: Failed to load OpenAPI/Swagger document from {args.swagger_uri}: {e}")
 

@@ -25,6 +25,8 @@ class TestMCPServer:
         
         expected_tools = [
             "load_swagger",
+            "list_swagger_services",
+            "load_swagger_service",
             "get_swagger_info", 
             "list_apis",
             "get_api_details",
@@ -337,3 +339,204 @@ class TestSpringdocSupport:
             assert choice_schema["schema"]["one_of"] is not None
         finally:
             parser.current_document = original_document
+
+
+class MockResponse:
+    def __init__(self, payload, content_type="application/json"):
+        self._payload = payload
+        self.headers = {"content-type": content_type}
+        self.text = json.dumps(payload, ensure_ascii=False)
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class TestSwaggerConfigSupport:
+    """测试 swagger-config 多服务加载"""
+
+    @pytest.fixture
+    def swagger_config_payload(self):
+        return {
+            "configUrl": "/v3/api-docs/swagger-config",
+            "oauth2RedirectUrl": "http://127.0.0.1:8080/swagger-ui/oauth2-redirect.html",
+            "urls": [
+                {"url": "/system/v3/api-docs", "name": "系统服务"},
+                {"url": "/auth/v3/api-docs", "name": "认证服务"},
+                {"url": "/facility/v3/api-docs", "name": "设施服务"},
+                {"url": "/resource/v3/api-docs", "name": "资源服务"}
+            ],
+            "urls.primaryName": "认证服务",
+            "validatorUrl": ""
+        }
+
+    @pytest.fixture
+    def auth_service_payload(self):
+        return {
+            "openapi": "3.0.1",
+            "info": {
+                "title": "认证服务 API",
+                "version": "1.0.0",
+                "description": "认证服务文档"
+            },
+            "servers": [{"url": "http://127.0.0.1:8080"}],
+            "paths": {
+                "/auth/login": {
+                    "post": {
+                        "summary": "登录",
+                        "responses": {
+                            "200": {
+                                "description": "OK"
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "LoginRequest": {
+                        "type": "object",
+                        "properties": {
+                            "username": {"type": "string"}
+                        }
+                    }
+                }
+            }
+        }
+
+    @pytest.mark.unit
+    def test_load_swagger_config_and_list_services(self, monkeypatch, swagger_config_payload):
+        from swagger_mcp.server import load_swagger, list_swagger_services
+        from swagger_mcp.parser import parser
+
+        original_document = parser.current_document
+        original_config = parser.current_swagger_config
+
+        def mock_get(url, timeout):
+            assert url == "http://127.0.0.1:8080/v3/api-docs/swagger-config"
+            assert timeout == 30
+            return MockResponse(swagger_config_payload)
+
+        monkeypatch.setattr("swagger_mcp.parser.requests.get", mock_get)
+
+        try:
+            result = load_swagger("http://127.0.0.1:8080/v3/api-docs/swagger-config")
+            assert result["success"] is True
+            assert result["primary_name"] == "认证服务"
+            assert len(result["services"]) == 4
+            assert parser.current_document == original_document
+
+            services = list_swagger_services()
+            assert services["success"] is True
+            auth_service = next(item for item in services["services"] if item["name"] == "认证服务")
+            assert auth_service["url"] == "/auth/v3/api-docs"
+            assert auth_service["document_url"] == "http://127.0.0.1:8080/auth/v3/api-docs"
+        finally:
+            parser.current_document = original_document
+            parser.current_swagger_config = original_config
+
+    @pytest.mark.unit
+    def test_load_swagger_service_by_name(self, monkeypatch, swagger_config_payload, auth_service_payload):
+        from swagger_mcp.server import load_swagger, load_swagger_service, get_swagger_info
+        from swagger_mcp.parser import parser
+
+        original_document = parser.current_document
+        original_config = parser.current_swagger_config
+
+        def mock_get(url, timeout):
+            assert timeout == 30
+            if url == "http://127.0.0.1:8080/v3/api-docs/swagger-config":
+                return MockResponse(swagger_config_payload)
+            if url == "http://127.0.0.1:8080/auth/v3/api-docs":
+                return MockResponse(auth_service_payload)
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        monkeypatch.setattr("swagger_mcp.parser.requests.get", mock_get)
+
+        try:
+            config_result = load_swagger("http://127.0.0.1:8080/v3/api-docs/swagger-config")
+            assert config_result["success"] is True
+
+            service_result = load_swagger_service("认证服务")
+            assert service_result["success"] is True
+            assert service_result["info"]["title"] == "认证服务 API"
+
+            info_result = get_swagger_info()
+            assert info_result["success"] is True
+            assert info_result["info"]["title"] == "认证服务 API"
+            assert info_result["info"]["api_count"] == 1
+        finally:
+            parser.current_document = original_document
+            parser.current_swagger_config = original_config
+
+    @pytest.mark.unit
+    def test_swagger_service_tools_fail_without_config(self):
+        from swagger_mcp.server import list_swagger_services, load_swagger_service
+        from swagger_mcp.parser import parser
+
+        original_document = parser.current_document
+        original_config = parser.current_swagger_config
+        parser.current_document = None
+        parser.current_swagger_config = None
+
+        try:
+            services = list_swagger_services()
+            assert services["success"] is False
+
+            load_result = load_swagger_service("认证服务")
+            assert load_result["success"] is False
+            assert "No Swagger config loaded" in load_result["error"]
+        finally:
+            parser.current_document = original_document
+            parser.current_swagger_config = original_config
+
+    @pytest.mark.unit
+    def test_load_swagger_service_returns_error_for_unknown_service(self, monkeypatch, swagger_config_payload):
+        from swagger_mcp.server import load_swagger, load_swagger_service
+        from swagger_mcp.parser import parser
+
+        original_document = parser.current_document
+        original_config = parser.current_swagger_config
+
+        def mock_get(url, timeout):
+            assert url == "http://127.0.0.1:8080/v3/api-docs/swagger-config"
+            assert timeout == 30
+            return MockResponse(swagger_config_payload)
+
+        monkeypatch.setattr("swagger_mcp.parser.requests.get", mock_get)
+
+        try:
+            load_swagger("http://127.0.0.1:8080/v3/api-docs/swagger-config")
+            result = load_swagger_service("不存在的服务")
+            assert result["success"] is False
+            assert "Swagger service not found" in result["error"]
+        finally:
+            parser.current_document = original_document
+            parser.current_swagger_config = original_config
+
+    @pytest.mark.unit
+    def test_load_swagger_keeps_normal_url_behavior(self, monkeypatch, auth_service_payload):
+        from swagger_mcp.server import load_swagger
+        from swagger_mcp.parser import parser
+
+        original_document = parser.current_document
+        original_config = parser.current_swagger_config
+
+        def mock_get(url, timeout):
+            assert url == "http://127.0.0.1:8080/auth/v3/api-docs"
+            assert timeout == 30
+            return MockResponse(auth_service_payload)
+
+        monkeypatch.setattr("swagger_mcp.parser.requests.get", mock_get)
+
+        try:
+            result = load_swagger("http://127.0.0.1:8080/auth/v3/api-docs")
+            assert result["success"] is True
+            assert result["info"]["title"] == "认证服务 API"
+            assert parser.current_document is not None
+            assert parser.current_document.info.title == "认证服务 API"
+        finally:
+            parser.current_document = original_document
+            parser.current_swagger_config = original_config

@@ -95,6 +95,21 @@ class SwaggerInfo(BaseModel):
     license: Optional[Dict[str, str]] = None
 
 
+class SwaggerService(BaseModel):
+    """swagger-config 中声明的服务"""
+    name: str
+    url: str
+    document_url: str
+
+
+class SwaggerConfig(BaseModel):
+    """swagger-ui / springdoc swagger-config 信息"""
+    config_url: str
+    origin: str
+    services: List[SwaggerService] = Field(default_factory=list)
+    primary_name: Optional[str] = None
+
+
 class SwaggerDocument(BaseModel):
     """完整的Swagger文档模型"""
     info: SwaggerInfo
