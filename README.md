@@ -12,41 +12,32 @@ An OpenAPI/Swagger document mcp tool built on [FastMCP](https://gofastmcp.com), 
 
 ```bash
 # Install dependencies
-git clone https://github.com/username/swagger-mcp.git
+git clone 
 cd swagger-mcp
 pip install -r requirements.txt
 
 # Run server
-python swagger_mcp/server.py --swagger-uri http://127.0.0.1:8080/auth/v3/api-docs
+# First
+##http注册模式，需要启动服务监听，命令如下
+FASTMCP_TRANSPORT=streamable-http \
+FASTMCP_HOST=127.0.0.1 \
+FASTMCP_PORT=8000 \
+python swagger_mcp/server.py --swagger-uri http://127.0.0.1:8080/v3/api-docs/swagger-config
 
-# Or run directly
-python swagger_mcp/server.py
-```
+##codex注册方式
+[mcp_servers.swagger-mcp]
+url = "http://127.0.0.1:8000/mcp"
 
-#### Method 2: Docker | Docker 方式
+# Seccond
+##stdin/out注册模式,直接在codex使用即可
+[mcp_servers.swagger-mcp]
+command = "python"
+args = [
+  "/Users/huayangchen/mycode/swagger-mcp/server_start.py",
+  "--swagger-uri",
+  "http://127.0.0.1:8080/v3/api-docs/swagger-config",
+]
 
-```bash
-docker run \
-  --add-host="host.docker.internal:host-gateway" -p 8000:8000 \
-  yangyaofei/swagger-mcp \
-  --swagger-uri http://host.docker.internal:8080/auth/v3/api-docs
-```
-
-### 🔧 Cursor IDE Integration | Cursor IDE 集成
-
-#### Configuration | 配置
-
-Add the following MCP configuration in Cursor 在 Cursor 中添加以下 MCP 配置:
-
-```json
-{
-  "mcpServers": {
-    "swagger-mcp": {
-      "url": "http://127.0.0.1:8000/mcp"
-    }
-  }
-}
-```
 
 ### 🛠️ Available Tools | 可用工具
 
