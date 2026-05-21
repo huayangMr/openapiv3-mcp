@@ -540,3 +540,164 @@ class TestSwaggerConfigSupport:
         finally:
             parser.current_document = original_document
             parser.current_swagger_config = original_config
+
+
+class TestSwaggerResourcesSupport:
+    """测试 Springfox Swagger 2.0 swagger-resources 分组加载"""
+
+    @pytest.fixture
+    def swagger_resources_payload(self):
+        return [
+            {
+                "name": "APP",
+                "url": "/v2/api-docs",
+                "location": "/v2/api-docs",
+                "swaggerVersion": "2.0"
+            },
+            {
+                "name": "管理后台",
+                "location": "/v2/api-docs?group=%E7%AE%A1%E7%90%86%E5%90%8E%E5%8F%B0",
+                "swaggerVersion": "2.0"
+            }
+        ]
+
+    @pytest.fixture
+    def app_swagger_v2_payload(self):
+        return {
+            "swagger": "2.0",
+            "info": {
+                "title": "APP API",
+                "version": "1.0.0",
+                "description": "APP 分组接口文档"
+            },
+            "host": "127.0.0.1:10021",
+            "basePath": "/makeid-boot",
+            "schemes": ["http"],
+            "paths": {
+                "/app/login": {
+                    "post": {
+                        "tags": ["APP"],
+                        "summary": "APP 登录",
+                        "parameters": [
+                            {
+                                "name": "body",
+                                "in": "body",
+                                "required": True,
+                                "schema": {"$ref": "#/definitions/LoginRequest"}
+                            }
+                        ],
+                        "responses": {
+                            "200": {
+                                "description": "OK",
+                                "schema": {"$ref": "#/definitions/LoginResponse"}
+                            }
+                        }
+                    }
+                }
+            },
+            "definitions": {
+                "LoginRequest": {
+                    "type": "object",
+                    "properties": {
+                        "username": {"type": "string", "description": "用户名"}
+                    },
+                    "required": ["username"]
+                },
+                "LoginResponse": {
+                    "type": "object",
+                    "properties": {
+                        "token": {"type": "string"}
+                    }
+                }
+            }
+        }
+
+    @pytest.mark.unit
+    def test_load_swagger_resources_and_list_services(self, monkeypatch, swagger_resources_payload):
+        from swagger_mcp.server import load_swagger, list_swagger_services
+        from swagger_mcp.parser import parser
+
+        original_document = parser.current_document
+        original_config = parser.current_swagger_config
+
+        def mock_get(url, timeout):
+            assert url == "http://127.0.0.1:10021/makeid-boot/swagger-resources"
+            assert timeout == 30
+            return MockResponse(swagger_resources_payload)
+
+        monkeypatch.setattr("swagger_mcp.parser.requests.get", mock_get)
+
+        try:
+            result = load_swagger("http://127.0.0.1:10021/makeid-boot/swagger-resources")
+            assert result["success"] is True
+            assert result["resource_type"] == "swagger_resources"
+            assert result["primary_name"] == "APP"
+            assert len(result["services"]) == 2
+
+            app_service = next(item for item in result["services"] if item["name"] == "APP")
+            assert app_service["url"] == "/v2/api-docs?group=APP"
+            assert app_service["document_url"] == "http://127.0.0.1:10021/makeid-boot/v2/api-docs?group=APP"
+
+            admin_service = next(item for item in result["services"] if item["name"] == "管理后台")
+            assert admin_service["document_url"] == (
+                "http://127.0.0.1:10021/makeid-boot/v2/api-docs?"
+                "group=%E7%AE%A1%E7%90%86%E5%90%8E%E5%8F%B0"
+            )
+
+            services = list_swagger_services()
+            assert services["success"] is True
+            assert services["config_url"] == "http://127.0.0.1:10021/makeid-boot/swagger-resources"
+        finally:
+            parser.current_document = original_document
+            parser.current_swagger_config = original_config
+
+    @pytest.mark.unit
+    def test_load_swagger_service_from_swagger_resources(
+        self,
+        monkeypatch,
+        swagger_resources_payload,
+        app_swagger_v2_payload
+    ):
+        from swagger_mcp.server import load_swagger, load_swagger_service, get_api_details, get_swagger_info
+        from swagger_mcp.parser import parser
+
+        original_document = parser.current_document
+        original_config = parser.current_swagger_config
+
+        def mock_get(url, timeout):
+            assert timeout == 30
+            if url == "http://127.0.0.1:10021/makeid-boot/swagger-resources":
+                return MockResponse(swagger_resources_payload)
+            if url == "http://127.0.0.1:10021/makeid-boot/v2/api-docs?group=APP":
+                return MockResponse(app_swagger_v2_payload)
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        monkeypatch.setattr("swagger_mcp.parser.requests.get", mock_get)
+
+        try:
+            resources_result = load_swagger(
+                "http://127.0.0.1:10021/makeid-boot/swagger-resources",
+                source_type="swagger_resources"
+            )
+            assert resources_result["success"] is True
+
+            service_result = load_swagger_service("APP")
+            assert service_result["success"] is True
+            assert service_result["info"]["title"] == "APP API"
+            assert service_result["info"]["api_count"] == 1
+            assert service_result["info"]["schema_count"] == 2
+
+            info_result = get_swagger_info()
+            assert info_result["success"] is True
+            assert info_result["info"]["servers"] == [
+                {"url": "http://127.0.0.1:10021/makeid-boot"}
+            ]
+
+            api_details = get_api_details("/app/login", "POST")
+            assert api_details["success"] is True
+            body_param = next(param for param in api_details["api"]["parameters"] if param["name"] == "body")
+            assert body_param["schema"] == {"$ref": "#/definitions/LoginRequest"}
+            assert api_details["api"]["responses"][0]["schema"] == {"$ref": "#/definitions/LoginResponse"}
+        finally:
+            parser.current_document = original_document
+            parser.current_swagger_config = original_config

@@ -30,15 +30,16 @@ def load_swagger(source: str, source_type: str = "url") -> Dict[str, Any]:
     
     Args:
         source: OpenAPI/Swagger文档的源（URL或文件路径）
-        source_type: 源类型，"url" 或 "file"
+        source_type: 源类型，"url"、"file" 或 "swagger_resources"
     
     Returns:
         包含加载结果的字典
     """
     try:
-        if source_type.lower() == "url":
+        normalized_source_type = source_type.lower()
+        if normalized_source_type in ("url", "auto"):
             result = parser.load_source_from_url(source)
-            if result["resource_type"] == "swagger_config":
+            if result["resource_type"] in ("swagger_config", "swagger_resources"):
                 swagger_config = result["swagger_config"]
                 services = [
                     {
@@ -48,20 +49,39 @@ def load_swagger(source: str, source_type: str = "url") -> Dict[str, Any]:
                     }
                     for service in swagger_config.services
                 ]
+                config_label = "Swagger resources" if result["resource_type"] == "swagger_resources" else "Swagger config"
                 return {
                     "success": True,
-                    "message": f"Successfully loaded Swagger config with {len(services)} services",
+                    "message": f"Successfully loaded {config_label} with {len(services)} services",
+                    "resource_type": result["resource_type"],
                     "services": services,
                     "primary_name": swagger_config.primary_name
                 }
 
             doc = result["document"]
-        elif source_type.lower() == "file":
+        elif normalized_source_type == "swagger_resources":
+            swagger_config = parser.load_swagger_resources_from_url(source)
+            services = [
+                {
+                    "name": service.name,
+                    "url": service.url,
+                    "document_url": service.document_url
+                }
+                for service in swagger_config.services
+            ]
+            return {
+                "success": True,
+                "message": f"Successfully loaded Swagger resources with {len(services)} services",
+                "resource_type": "swagger_resources",
+                "services": services,
+                "primary_name": swagger_config.primary_name
+            }
+        elif normalized_source_type == "file":
             doc = parser.load_from_file(source)
         else:
             return {
                 "success": False,
-                "error": f"Invalid source_type: {source_type}. Must be 'url' or 'file'"
+                "error": f"Invalid source_type: {source_type}. Must be 'url', 'file', 'auto', or 'swagger_resources'"
             }
         
         return {
@@ -424,17 +444,33 @@ def run_server():
         "--swagger-uri",
         help="OpenAPI/Swagger document URL or local file path"
     )
+    arg_parser.add_argument(
+        "--swagger-source-type",
+        default="auto",
+        choices=["auto", "url", "file", "swagger_resources"],
+        help="Source type for --swagger-uri"
+    )
     args = arg_parser.parse_args()
 
     if args.swagger_uri:
         print(f"Loading OpenAPI/Swagger document: {args.swagger_uri}")
         try:
-            if args.swagger_uri.startswith(("http://", "https://")):
+            if args.swagger_source_type == "swagger_resources":
+                swagger_config = parser.load_swagger_resources_from_url(args.swagger_uri)
+                print(
+                    "Successfully loaded Swagger resources: "
+                    f"{len(swagger_config.services)} services discovered"
+                )
+                doc = None
+            elif args.swagger_source_type == "file":
+                doc = parser.load_from_file(args.swagger_uri)
+            elif args.swagger_uri.startswith(("http://", "https://")):
                 result = parser.load_source_from_url(args.swagger_uri)
-                if result["resource_type"] == "swagger_config":
+                if result["resource_type"] in ("swagger_config", "swagger_resources"):
                     swagger_config = result["swagger_config"]
+                    config_label = "Swagger resources" if result["resource_type"] == "swagger_resources" else "Swagger config"
                     print(
-                        "Successfully loaded Swagger config: "
+                        f"Successfully loaded {config_label}: "
                         f"{len(swagger_config.services)} services discovered"
                     )
                     doc = None

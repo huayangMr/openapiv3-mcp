@@ -6,7 +6,7 @@ Supports OpenAPI 3.0 and Swagger 2.0 specifications
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
 import yaml
@@ -37,6 +37,8 @@ class SwaggerParser:
             spec_dict = self._fetch_spec_dict_from_url(url)
             if self._is_swagger_config(spec_dict):
                 raise ValueError("URL points to a Swagger config document, not an OpenAPI/Swagger spec")
+            if self._is_swagger_resources(spec_dict):
+                raise ValueError("URL points to a Swagger resources document, not an OpenAPI/Swagger spec")
             self.current_document = self._parse_spec(spec_dict)
             return self.current_document
             
@@ -46,13 +48,19 @@ class SwaggerParser:
             raise ValueError(f"Failed to parse Swagger document: {e}")
 
     def load_source_from_url(self, url: str) -> Dict[str, Any]:
-        """从 URL 加载资源，支持 OpenAPI 文档和 swagger-config"""
+        """从 URL 加载资源，支持 OpenAPI 文档、swagger-config 和 Springfox swagger-resources"""
         try:
             spec_dict = self._fetch_spec_dict_from_url(url)
             if self._is_swagger_config(spec_dict):
                 swagger_config = self._store_swagger_config(url, spec_dict)
                 return {
                     "resource_type": "swagger_config",
+                    "swagger_config": swagger_config
+                }
+            if self._is_swagger_resources(spec_dict):
+                swagger_config = self._store_swagger_resources(url, spec_dict)
+                return {
+                    "resource_type": "swagger_resources",
                     "swagger_config": swagger_config
                 }
 
@@ -65,6 +73,18 @@ class SwaggerParser:
             raise ValueError(f"Failed to load Swagger document from URL: {e}")
         except (json.JSONDecodeError, yaml.YAMLError) as e:
             raise ValueError(f"Failed to parse Swagger document: {e}")
+
+    def load_swagger_resources_from_url(self, url: str) -> SwaggerConfig:
+        """从 Springfox swagger-resources URL 加载 Swagger 2.0 分组列表"""
+        try:
+            spec_dict = self._fetch_spec_dict_from_url(url)
+            if not self._is_swagger_resources(spec_dict):
+                raise ValueError("URL does not point to a valid Swagger resources document")
+            return self._store_swagger_resources(url, spec_dict)
+        except requests.RequestException as e:
+            raise ValueError(f"Failed to load Swagger resources from URL: {e}")
+        except (json.JSONDecodeError, yaml.YAMLError) as e:
+            raise ValueError(f"Failed to parse Swagger resources: {e}")
     
     def load_from_file(self, file_path: str) -> SwaggerDocument:
         """从本地文件加载OpenAPI/Swagger文档"""
@@ -130,7 +150,7 @@ class SwaggerParser:
             security_definitions=security_definitions
         )
 
-    def _fetch_spec_dict_from_url(self, url: str) -> Dict[str, Any]:
+    def _fetch_spec_dict_from_url(self, url: str) -> Any:
         """从远程地址拉取并解析 JSON/YAML"""
         response = requests.get(url, timeout=30)
         response.raise_for_status()
@@ -146,18 +166,33 @@ class SwaggerParser:
             except json.JSONDecodeError:
                 spec_dict = yaml.safe_load(response.text)
 
-        if not isinstance(spec_dict, dict):
-            raise ValueError("Swagger response is not a valid JSON/YAML object")
+        if not isinstance(spec_dict, (dict, list)):
+            raise ValueError("Swagger response is not a valid JSON/YAML object or array")
         return spec_dict
 
-    def _is_swagger_config(self, spec_dict: Dict[str, Any]) -> bool:
+    def _is_swagger_config(self, spec_dict: Any) -> bool:
         """识别 swagger-ui / springdoc 的 swagger-config 返回体"""
+        if not isinstance(spec_dict, dict):
+            return False
+
         urls = spec_dict.get('urls')
         if not isinstance(urls, list) or not urls:
             return False
 
         for service in urls:
             if not isinstance(service, dict) or 'url' not in service:
+                return False
+        return True
+
+    def _is_swagger_resources(self, spec_dict: Any) -> bool:
+        """识别 Springfox Swagger 2.0 的 /swagger-resources 返回体"""
+        if not isinstance(spec_dict, list) or not spec_dict:
+            return False
+
+        for resource in spec_dict:
+            if not isinstance(resource, dict):
+                return False
+            if not any(key in resource for key in ('name', 'url', 'location')):
                 return False
         return True
 
@@ -187,11 +222,79 @@ class SwaggerParser:
         self.current_swagger_config = swagger_config
         return swagger_config
 
+    def _store_swagger_resources(self, resources_url: str, spec_list: List[Dict[str, Any]]) -> SwaggerConfig:
+        """缓存 Springfox swagger-resources 分组信息"""
+        split_result = urlsplit(resources_url)
+        origin = f"{split_result.scheme}://{split_result.netloc}"
+        context_path = split_result.path.split('/swagger-resources', 1)[0].rstrip('/')
+        context_origin = f"{origin}{context_path}" if context_path else origin
+
+        services = []
+        for item in spec_list:
+            raw_url = str(item.get('location') or item.get('url') or '')
+            name = str(item.get('name') or raw_url or 'default')
+            service_url = self._normalize_swagger_resource_url(raw_url, name)
+            services.append(
+                SwaggerService(
+                    name=name,
+                    url=service_url,
+                    document_url=self._build_swagger_resource_document_url(
+                        origin=origin,
+                        context_origin=context_origin,
+                        context_path=context_path,
+                        service_url=service_url
+                    )
+                )
+            )
+
+        swagger_config = SwaggerConfig(
+            config_url=resources_url,
+            origin=context_origin,
+            services=services,
+            primary_name=services[0].name if services else None
+        )
+        self.current_swagger_config = swagger_config
+        return swagger_config
+
     def _build_service_document_url(self, origin: str, service_url: str) -> str:
         """构造服务文档的完整访问地址"""
         if service_url.startswith(("http://", "https://")):
             return service_url
         return urljoin(f"{origin}/", service_url.lstrip("/"))
+
+    def _normalize_swagger_resource_url(self, resource_url: str, name: str) -> str:
+        """补齐 Springfox v2 api-docs 分组查询参数"""
+        service_url = resource_url or "/v2/api-docs"
+        parsed = urlsplit(service_url)
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        has_group = any(key == "group" for key, _ in query)
+
+        if not has_group and name:
+            query.append(("group", name))
+
+        return urlunsplit((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path or "/v2/api-docs",
+            urlencode(query),
+            parsed.fragment
+        ))
+
+    def _build_swagger_resource_document_url(
+        self,
+        origin: str,
+        context_origin: str,
+        context_path: str,
+        service_url: str
+    ) -> str:
+        """构造 Springfox swagger-resources 分组文档地址，兼容应用 context path"""
+        if service_url.startswith(("http://", "https://")):
+            return service_url
+
+        if service_url.startswith("/") and context_path and service_url.startswith(f"{context_path}/"):
+            return urljoin(f"{origin}/", service_url.lstrip("/"))
+
+        return urljoin(f"{context_origin}/", service_url.lstrip("/"))
 
     def list_swagger_services(self) -> List[SwaggerService]:
         """返回当前缓存的服务列表"""
