@@ -324,7 +324,7 @@ class SwaggerParser:
         
         for path, path_item in paths.items():
             for method, operation in path_item.items():
-                if method.lower() not in ['get', 'post', 'put', 'delete', 'patch', 'head', 'options']:
+                if method.lower() not in ['get', 'post', 'put', 'delete', 'patch', 'head', 'options', 'trace']:
                     continue
                 
                 # 解析参数
