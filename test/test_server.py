@@ -310,6 +310,40 @@ class TestSpringdocSupport:
         assert social_id_param.type == "integer"
 
     @pytest.mark.unit
+    def test_parser_includes_trace_operations(self, tmp_path):
+        from swagger_mcp.parser import SwaggerParser
+
+        spec = {
+            "openapi": "3.0.3",
+            "info": {
+                "title": "Trace API",
+                "version": "1.0.0"
+            },
+            "paths": {
+                "/diagnostics": {
+                    "trace": {
+                        "operationId": "traceDiagnostics",
+                        "summary": "Trace diagnostics",
+                        "responses": {
+                            "200": {
+                                "description": "OK"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        fixture_file = tmp_path / "trace-openapi.json"
+        fixture_file.write_text(json.dumps(spec), encoding="utf-8")
+
+        parser = SwaggerParser()
+        doc = parser.load_from_file(str(fixture_file))
+
+        trace_api = next(api for api in doc.apis if api.path == "/diagnostics")
+        assert trace_api.method == "TRACE"
+        assert trace_api.operation_id == "traceDiagnostics"
+
+    @pytest.mark.unit
     def test_server_returns_springdoc_request_body_and_schema_fields(self, springdoc_fixture_file):
         from swagger_mcp.server import get_api_details, get_schema_details
         from swagger_mcp.parser import parser
