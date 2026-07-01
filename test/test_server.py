@@ -340,6 +340,83 @@ class TestSpringdocSupport:
         finally:
             parser.current_document = original_document
 
+    @pytest.mark.unit
+    def test_parser_loads_xquik_openapi31_search_spec(self, tmp_path):
+        """OpenAPI 3.1 search specs keep server, security, and query params."""
+        from swagger_mcp.parser import SwaggerParser
+
+        spec = {
+            "openapi": "3.1.0",
+            "info": {"title": "Xquik API", "version": "1.0"},
+            "servers": [{"url": "https://xquik.com"}],
+            "components": {
+                "securitySchemes": {
+                    "apiKey": {
+                        "type": "apiKey",
+                        "name": "x-api-key",
+                        "in": "header",
+                    }
+                }
+            },
+            "paths": {
+                "/api/v1/x/tweets/search": {
+                    "get": {
+                        "tags": ["X"],
+                        "operationId": "searchTweets",
+                        "summary": "Search X posts",
+                        "security": [{"apiKey": []}],
+                        "parameters": [
+                            {
+                                "name": "q",
+                                "in": "query",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                            {
+                                "name": "queryType",
+                                "in": "query",
+                                "schema": {
+                                    "type": "string",
+                                    "enum": ["Latest", "Top"],
+                                    "default": "Latest",
+                                },
+                            },
+                            {
+                                "name": "limit",
+                                "in": "query",
+                                "schema": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 200,
+                                    "default": 20,
+                                },
+                            },
+                        ],
+                        "responses": {"200": {"description": "Search results"}},
+                    }
+                }
+            },
+        }
+        fixture_file = tmp_path / "xquik-openapi.json"
+        fixture_file.write_text(json.dumps(spec), encoding="utf-8")
+
+        parser = SwaggerParser()
+        doc = parser.load_from_file(str(fixture_file))
+        api = next(item for item in doc.apis if item.operation_id == "searchTweets")
+        params = {param.name: param for param in api.parameters}
+
+        assert doc.info.title == "Xquik API"
+        assert doc.servers[0]["url"] == "https://xquik.com"
+        assert doc.security_definitions["apiKey"]["name"] == "x-api-key"
+        assert api.path == "/api/v1/x/tweets/search"
+        assert api.method == "GET"
+        assert api.security == [{"apiKey": []}]
+        assert params["q"].required is True
+        assert params["queryType"].schema["enum"] == ["Latest", "Top"]
+        assert params["queryType"].schema["default"] == "Latest"
+        assert params["limit"].type == "integer"
+        assert params["limit"].schema["maximum"] == 200
+
 
 class MockResponse:
     def __init__(self, payload, content_type="application/json"):
